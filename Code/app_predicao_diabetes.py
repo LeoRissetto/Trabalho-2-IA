@@ -5,6 +5,9 @@ import numpy as np
 import pandas as pd
 import joblib
 import os
+import shap
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
 MODEL_FILENAME = 'random_forest_diabetes.pkl'
@@ -29,11 +32,13 @@ def load_model_and_scaler():
     try:
         model = joblib.load(model_path)
         scaler = joblib.load(scaler_path)
-        return model, scaler
+        # Criar o explainer SHAP para o modelo
+        explainer = shap.TreeExplainer(model)
+        return model, scaler, explainer
     except Exception as e:
         raise RuntimeError(f"Erro ao carregar modelo ou scaler: {e}")
 
-model, scaler = load_model_and_scaler()
+model, scaler, explainer = load_model_and_scaler()
 
 
 
@@ -51,7 +56,7 @@ def create_main_window():
     root = tk.Tk()
     root.title("Predição de Diabetes")
     root.configure(bg="#f0f4f8")
-    root.geometry("470x470")
+    root.geometry("480x490")
     return root
 
 def create_field_vars():
@@ -115,16 +120,132 @@ def prever_diabetes():
         dados_scaled = scaler.transform(df_input)
         df_scaled = pd.DataFrame(dados_scaled, columns=colunas)
         resultado = model.predict(df_scaled)
-        exibir_resultado(resultado[0])
+        
+        # Calcular os valores SHAP para a explicação
+        shap_values = explainer.shap_values(df_scaled)
+        
+        # Obter o valor base do modelo para a classe positiva (diabetes)
+        base_value = explainer.expected_value[1]
+
+        # Para explicação, usamos os valores SHAP para a classe positiva (índice 1 - diabetes)
+        shap_values_diabetes = shap_values[0, :, 1]  # [instância, feature, classe]
+        
+        exibir_resultado(resultado[0], df_input, shap_values_diabetes, base_value)
     except Exception as e:
         messagebox.showerror("Erro", f"Verifique os dados inseridos.\n{e}")
 
-def exibir_resultado(resultado):
+def exibir_resultado(resultado, dados_originais, shap_valores, base_value):
     if resultado == 1:
-        msg = "Atenção: Possível diagnóstico de diabetes."
+        titulo = "Atenção: Possível diagnóstico de diabetes."
     else:
-        msg = "Sem indícios de diabetes."
-    messagebox.showinfo("Resultado", msg)
+        titulo = "Sem indícios de diabetes."
+    
+    # Criar uma nova janela para a exibição do resultado e do gráfico
+    resultado_window = tk.Toplevel()
+    resultado_window.title("Resultado da Predição")
+    resultado_window.geometry("900x600")  # Aumentar o tamanho da janela para melhor visualização
+    resultado_window.configure(bg="#f0f4f8")
+    
+    # Centralizar a janela na tela
+    # Pegar dimensões da tela
+    screen_width = resultado_window.winfo_screenwidth()
+    screen_height = resultado_window.winfo_screenheight()
+    
+    # Calcular posição
+    x = (screen_width / 2) - (900 / 2)
+    y = (screen_height / 2) - (600 / 2)
+    
+    # Definir geometria
+    resultado_window.geometry(f"900x600+{int(x)}+{int(y)}")
+    
+    # Adicionar título
+    tk.Label(
+        resultado_window,
+        text=titulo,
+        font=("Arial", 14, "bold"),
+        bg="#f0f4f8",
+        fg="#007acc" if resultado == 0 else "#e74c3c"
+    ).pack(pady=(20, 10))
+    
+    # Adicionar explicação
+    tk.Label(
+        resultado_window,
+        text="O gráfico abaixo mostra os fatores que mais influenciaram este resultado:",
+        font=("Arial", 12),
+        bg="#f0f4f8"
+    ).pack(pady=(5, 5))
+    
+    # Explicação das cores do gráfico SHAP
+    tk.Label(
+        resultado_window,
+        text="Vermelho = aumenta chance de diabetes | Azul = diminui chance de diabetes",
+        font=("Arial", 10, "italic"),
+        bg="#f0f4f8",
+        fg="#555555"
+    ).pack(pady=(0, 5))
+    
+    # Explicação adicional para o gráfico de barras
+    tk.Label(
+        resultado_window,
+        text="As características estão ordenadas por importância, com as mais impactantes no topo",
+        font=("Arial", 10, "italic"),
+        bg="#f0f4f8",
+        fg="#555555"
+    ).pack(pady=(0, 15))
+    
+    try:
+        # Inicializar o JavaScript do SHAP (importante para os gráficos)
+        shap.initjs()
+        
+        # Criar figura com tamanho maior para evitar sobreposição
+        plt.figure(figsize=(12, 5))
+        
+        # Criar o gráfico de waterfall SHAP (alternativa ao force_plot que evita sobreposição)
+        # Ordenar os valores SHAP para melhorar a legibilidade
+        feature_names = dados_originais.columns.tolist()
+        feature_importance = dict(zip(feature_names, abs(shap_valores)))
+        sorted_idx = [i for i, _ in sorted(enumerate(abs(shap_valores)), key=lambda x: x[1], reverse=True)]
+        
+        # Criar o gráfico de barras SHAP em vez do force plot para evitar sobreposição
+        plt.barh(
+            [feature_names[i] for i in sorted_idx],
+            [shap_valores[i] for i in sorted_idx],
+            color=['#ff0051' if shap_valores[i] > 0 else '#008bfb' for i in sorted_idx]
+        )
+        plt.axvline(x=0, color='#333333', linestyle='-', alpha=0.3)
+        plt.xlabel('Impacto no modelo (SHAP value)')
+        plt.title('Contribuição de cada característica para a predição')
+        
+        # Definir a cor de fundo da figura como branco
+        force_plot_fig = plt.gcf()
+        force_plot_fig.set_facecolor('white')
+        
+        # Ajustar o layout para evitar cortes no gráfico
+        plt.tight_layout(pad=2.0)
+    except Exception as e:
+        # Em caso de erro, criar uma figura simples com a mensagem de erro
+        force_plot_fig = plt.figure(figsize=(10, 3))
+        plt.text(0.5, 0.5, f"Erro ao criar gráfico SHAP: {e}", 
+                horizontalalignment='center', verticalalignment='center')
+        plt.axis('off')
+    
+    # Criar o canvas para exibir o gráfico na janela do Tkinter
+    canvas = FigureCanvasTkAgg(force_plot_fig, master=resultado_window)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+    
+    # Adicionar botão para fechar
+    fechar_btn = ttk.Button(
+        resultado_window,
+        text="Fechar",
+        command=resultado_window.destroy,
+    )
+    fechar_btn.pack(pady=(10, 20), ipadx=20, ipady=5)
+    
+    # Garantir que esta janela fique em foco
+    resultado_window.transient(root)
+    resultado_window.grab_set()
+    root.wait_window(resultado_window)
 
 
 
@@ -171,6 +292,15 @@ def criar_interface():
         font=("Arial", 10, "italic")
     )
     tip_label.pack(side="bottom", pady=2)
+    
+    xai_label = tk.Label(
+        root,
+        text="Inclui explicação visual com tecnologia XAI",
+        bg="#f0f4f8",
+        fg="#555555",
+        font=("Arial", 9, "italic")
+    )
+    xai_label.pack(side="bottom", pady=1)
     return entradas
 
 entradas = criar_interface()
